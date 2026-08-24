@@ -1,5 +1,8 @@
 import './App.css';
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "./firebase";
+import Login from "./Login";
 
 // ---- Mock seed data -------------------------------------------------
 const COURSES = [
@@ -83,6 +86,13 @@ function PaperCard({ children, className = "" }) {
 // ---- Main App -------------------------------------------------
 
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [showLogin, setShowLogin] = useState(false);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUser(u));
+    return unsub;
+  }, []);
   const [listings] = useState(seedListings);
   const [query, setQuery] = useState("");
   const [dept, setDept] = useState("All");
@@ -150,7 +160,7 @@ export default function App() {
                 className="text-[12px] uppercase tracking-[0.14em] text-[#6B6250]"
                 style={{ fontFamily: "'Inter', sans-serif" }}
               >
-                Notes &amp; past exams, by students — for Medipol students
+                Notes &amp; past exams, by Medipol students
               </p>
             </div>
           </div>
@@ -176,6 +186,19 @@ export default function App() {
               </button>
             ))}
           </nav>
+                  <button
+          onClick={() => (user ? auth.signOut() : setShowLogin(true))}
+          className="ml-2 text-[13px] font-semibold px-3 py-1.5 rounded-sm bg-[#1B2A4A] text-[#F6F1E4]"
+        >
+          {user ? "Sign out" : "Sign in"}
+        </button>
+        {user && (
+          <span className="text-[12px] text-[#6B6250] ml-1">
+            {user.email}
+          </span>
+        )}
+
+        {showLogin && <Login onClose={() => setShowLogin(false)} />}
         </div>
       </header>
 
@@ -275,7 +298,21 @@ export default function App() {
           </>
         )}
 
-        {view === "sell" && (
+       {view === "sell" && !user && (
+  <PaperCard className="p-10 text-center max-w-md mx-auto">
+    <p className="text-lg font-semibold mb-2">Sign in required</p>
+    <p className="text-[#6B6250] text-sm mb-4">
+      You need an account to post a listing.
+    </p>
+    <button
+      onClick={() => setShowLogin(true)}
+      className="bg-[#1B2A4A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm"
+    >
+      Sign in
+    </button>
+  </PaperCard>
+)}
+{view === "sell" && user && (
           <PaperCard className="p-7 max-w-lg mx-auto">
             <div className="mb-5">
               <Stamp tone="gold">New listing</Stamp>
