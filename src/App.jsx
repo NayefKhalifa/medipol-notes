@@ -1,8 +1,10 @@
 import './App.css';
 import React, { useState, useMemo, useEffect } from "react";
-import { onAuthStateChanged, signOut } from "firebase/auth";
-import { auth } from "./firebase";
-import Login from "./Login";
+import { onAuthStateChanged, signOut, sendEmailVerification } from "firebase/auth";
+import { collection, addDoc, onSnapshot, query as firestoreQuery, orderBy, serverTimestamp } from "firebase/firestore";
+import { auth, db } from "./firebase";
+import Login from "./Login"; 
+import { supabase } from "./supabase";
 
 // ---- Mock seed data -------------------------------------------------
 const COURSES = [
@@ -93,18 +95,29 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
     return unsub;
   }, []);
-  const [listings] = useState(seedListings);
+    const [listings, setListings] = useState([]);
+
+  useEffect(() => {
+        const q = firestoreQuery(collection(db, "listings"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      setListings(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+    });
+    return unsub;
+  }, []);
   const [query, setQuery] = useState("");
   const [dept, setDept] = useState("All");
   const [view, setView] = useState("browse"); // browse | sell | cart
   const [cart, setCart] = useState([]);
   const [sellForm, setSellForm] = useState({
-    course: COURSES[0].code,
-    title: "",
-    type: "Lecture notes",
-    price: 35,
-  });
+  course: COURSES[0].code,
+  title: "",
+  type: "Lecture notes",
+  price: 35,
+  description: "",
+  file: null,
+});
   const [posted, setPosted] = useState(null);
+  const [uploading, setUploading] = useState(false);
 
   const depts = ["All", ...Array.from(new Set(COURSES.map((c) => c.dept)))];
 
@@ -154,13 +167,13 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-2xl font-bold leading-tight tracking-tight">
-                Medipol Not Pazarı
+                Kampüs Not Pazarı
               </h1>
               <p
                 className="text-[12px] uppercase tracking-[0.14em] text-[#6B6250]"
                 style={{ fontFamily: "'Inter', sans-serif" }}
               >
-                Notes &amp; past exams, by Medipol students
+                Notes &amp; past exams, shared by students
               </p>
             </div>
           </div>
@@ -239,9 +252,12 @@ export default function App() {
               </PaperCard>
             ) : (
               <div className="grid sm:grid-cols-2 gap-5">
-                {filtered.map((l) => {
+                                {filtered.map((l) => {
                   const course = COURSES.find((c) => c.code === l.course);
                   const inCart = cart.find((c) => c.id === l.id);
+                  const sellerLabel = l.sellerEmail
+                    ? l.sellerEmail.split("@")[0]
+                    : l.seller || "Unknown";
                   return (
                     <PaperCard key={l.id} className="p-5 flex flex-col gap-3">
                       <div className="flex items-start justify-between gap-2">
@@ -252,7 +268,7 @@ export default function App() {
                           className="text-[13px] text-[#A87A17] font-semibold"
                           style={{ fontFamily: "'Inter', sans-serif" }}
                         >
-                          ★ {l.rating}
+                          {l.rating ? `★ ${l.rating}` : "New"}
                         </span>
                       </div>
                       <div>
@@ -263,23 +279,41 @@ export default function App() {
                           className="text-[13px] text-[#6B6250] mt-0.5"
                           style={{ fontFamily: "'Inter', sans-serif" }}
                         >
-                          {course.name} · {l.pages} pages · {l.sales} sold
+                          {course.name}{l.sales ? ` · ${l.sales} sold` : ""}
                         </p>
+                        {l.description && (
+  <p
+    className="text-[13px] text-[#4A4436] line-clamp-2"
+    style={{ fontFamily: "'Inter', sans-serif" }}
+  >
+    {l.description}
+  </p>
+)}
                       </div>
                       <div
                         className="flex items-center justify-between mt-1 pt-3 border-t border-dashed border-[#C9BE9F]"
                         style={{ fontFamily: "'Inter', sans-serif" }}
                       >
                         <span className="text-[13px] text-[#6B6250]">
-                          by {l.seller}
+                          by {sellerLabel}
                         </span>
                         <div className="flex items-center gap-3">
                           <span className="font-mono font-semibold text-[15px]">
                             ₺{l.price}
                           </span>
                           <button
-                            onClick={() => addToCart(l)}
-                            disabled={!!inCart}
+  onClick={() => {
+    if (!user) {
+      setShowLogin(true);
+      return;
+    }
+    if (!user.emailVerified) {
+      alert("Please verify your email before buying — check your inbox for the verification link.");
+      return;
+    }
+    addToCart(l);
+  }}
+  disabled={!!inCart}
                             className={`text-[13px] font-semibold px-3 py-1.5 rounded-sm transition-colors ${
                               inCart
                                 ? "bg-[#D8CFB8] text-[#6B6250] cursor-default"
@@ -297,136 +331,213 @@ export default function App() {
             )}
           </>
         )}
-
-       {view === "sell" && !user && (
+{view === "sell" && user && !user.emailVerified && (
   <PaperCard className="p-10 text-center max-w-md mx-auto">
-    <p className="text-lg font-semibold mb-2">Sign in required</p>
+    <p className="text-lg font-semibold mb-2">Verify your email first</p>
     <p className="text-[#6B6250] text-sm mb-4">
-      You need an account to post a listing.
+      We sent a verification link to {user.email}. Click it, then come back here.
     </p>
-    <button
-      onClick={() => setShowLogin(true)}
-      className="bg-[#1B2A4A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm"
-    >
-      Sign in
-    </button>
+    <div className="flex gap-2 justify-center">
+      <button
+        onClick={async () => {
+          await sendEmailVerification(user);
+          alert("Verification email sent again — check your inbox.");
+        }}
+        className="bg-[#1B2A4A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm"
+      >
+        Resend email
+      </button>
+      <button
+        onClick={async () => {
+          await user.reload();
+          setUser({ ...auth.currentUser });
+        }}
+        className="bg-[#D8CFB8] text-[#1B2A4A] font-semibold text-sm px-4 py-2.5 rounded-sm"
+      >
+        I've verified — refresh
+      </button>
+    </div>
   </PaperCard>
 )}
-{view === "sell" && user && (
-          <PaperCard className="p-7 max-w-lg mx-auto">
-            <div className="mb-5">
-              <Stamp tone="gold">New listing</Stamp>
-              <h2 className="text-xl font-bold mt-2">Sell your notes</h2>
-              <p
-                className="text-[13px] text-[#6B6250] mt-1"
-                style={{ fontFamily: "'Inter', sans-serif" }}
-              >
-                List once, earn every time a classmate buys it.
-              </p>
-            </div>
+       {view === "sell" && user && user.emailVerified && (
+  <PaperCard className="p-7 max-w-lg mx-auto">
+    <div className="mb-5">
+      <Stamp tone="gold">New listing</Stamp>
+      <h2 className="text-xl font-bold mt-2">Sell your notes</h2>
+      <p
+        className="text-[13px] text-[#6B6250] mt-1"
+        style={{ fontFamily: "'Inter', sans-serif" }}
+      >
+        List once, earn every time a classmate buys it.
+      </p>
+    </div>
 
-            {posted ? (
-              <div className="text-center py-6">
-                <p className="text-lg font-semibold mb-1">Listing posted.</p>
-                <p
-                  className="text-[13px] text-[#6B6250] mb-4"
-                  style={{ fontFamily: "'Inter', sans-serif" }}
-                >
-                  "{posted.title}" is now visible under {posted.course}.
-                </p>
-                <button
-                  onClick={() => {
-                    setPosted(null);
-                    setView("browse");
-                  }}
-                  className="text-[13px] font-semibold px-4 py-2 rounded-sm bg-[#1B2A4A] text-[#F6F1E4]"
-                  style={{ fontFamily: "'Inter', sans-serif" }}
-                >
-                  View in Browse
-                </button>
-              </div>
-            ) : (
-              <form
-                className="flex flex-col gap-4"
-                style={{ fontFamily: "'Inter', sans-serif" }}
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setPosted({ ...sellForm });
-                }}
-              >
-                <label className="text-sm font-medium">
-                  Course
-                  <select
-                    value={sellForm.course}
-                    onChange={(e) =>
-                      setSellForm({ ...sellForm, course: e.target.value })
-                    }
-                    className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
-                  >
-                    {COURSES.map((c) => (
-                      <option key={c.code} value={c.code}>
-                        {c.code} — {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+    {posted ? (
+      <div className="text-center py-6">
+        <p className="text-lg font-semibold mb-1">Listing posted.</p>
+        <p
+          className="text-[13px] text-[#6B6250] mb-4"
+          style={{ fontFamily: "'Inter', sans-serif" }}
+        >
+          "{posted.title}" is now visible under {posted.course}.
+        </p>
+        <button
+          onClick={() => {
+            setPosted(null);
+            setView("browse");
+          }}
+          className="text-[13px] font-semibold px-4 py-2 rounded-sm bg-[#1B2A4A] text-[#F6F1E4]"
+          style={{ fontFamily: "'Inter', sans-serif" }}
+        >
+          View in Browse
+        </button>
+      </div>
+    ) : (
+      <form
+        className="flex flex-col gap-4"
+        style={{ fontFamily: "'Inter', sans-serif" }}
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!sellForm.file) {
+            alert("Please attach a PDF of your notes.");
+            return;
+          }
+          setUploading(true);
+          try {
+            const fileExt = sellForm.file.name.split(".").pop();
+const safeName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${fileExt}`;
+const filePath = `${user.uid}/${safeName}`;
+            const { error: uploadError } = await supabase.storage
+              .from("notes")
+              .upload(filePath, sellForm.file);
+            if (uploadError) throw uploadError;
 
-                <label className="text-sm font-medium">
-                  Title
-                  <input
-                    required
-                    value={sellForm.title}
-                    onChange={(e) =>
-                      setSellForm({ ...sellForm, title: e.target.value })
-                    }
-                    placeholder="e.g. Midterm 1 solved past exam"
-                    className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A] placeholder:text-[#9A917A]"
-                  />
-                </label>
+            const { data: urlData } = supabase.storage
+              .from("notes")
+              .getPublicUrl(filePath);
 
-                <label className="text-sm font-medium">
-                  Type
-                  <select
-                    value={sellForm.type}
-                    onChange={(e) =>
-                      setSellForm({ ...sellForm, type: e.target.value })
-                    }
-                    className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
-                  >
-                    {["Lecture notes", "Solved past exam", "Study guide", "Lab summary"].map(
-                      (t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      )
-                    )}
-                  </select>
-                </label>
+            await addDoc(collection(db, "listings"), {
+              course: sellForm.course,
+              title: sellForm.title,
+              type: sellForm.type,
+              price: sellForm.price,
+              description: sellForm.description,
+              fileUrl: urlData.publicUrl,
+              sellerEmail: user.email,
+              sellerId: user.uid,
+              rating: null,
+              sales: 0,
+              createdAt: serverTimestamp(),
+            });
+            setPosted({ ...sellForm });
+          } catch (err) {
+            alert("Couldn't post listing: " + err.message);
+          } finally {
+            setUploading(false);
+          }
+        }}
+      >
+        <label className="text-sm font-medium">
+          Course
+          <select
+            value={sellForm.course}
+            onChange={(e) =>
+              setSellForm({ ...sellForm, course: e.target.value })
+            }
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
+          >
+            {COURSES.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.code} — {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
 
-                <label className="text-sm font-medium">
-                  Price (₺)
-                  <input
-                    type="number"
-                    min={5}
-                    max={300}
-                    value={sellForm.price}
-                    onChange={(e) =>
-                      setSellForm({ ...sellForm, price: Number(e.target.value) })
-                    }
-                    className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] font-mono focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
-                  />
-                </label>
+        <label className="text-sm font-medium">
+          Title
+          <input
+            required
+            value={sellForm.title}
+            onChange={(e) =>
+              setSellForm({ ...sellForm, title: e.target.value })
+            }
+            placeholder="e.g. Midterm 1 solved past exam"
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A] placeholder:text-[#9A917A]"
+          />
+        </label>
 
-                <button
-                  type="submit"
-                  className="mt-1 bg-[#B8342A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm hover:bg-[#9C2C24] transition-colors"
-                >
-                  Post listing
-                </button>
-              </form>
+        <label className="text-sm font-medium">
+          Description
+          <textarea
+            required
+            rows={3}
+            value={sellForm.description}
+            onChange={(e) =>
+              setSellForm({ ...sellForm, description: e.target.value })
+            }
+            placeholder="What's inside? e.g. Covers weeks 1–7, includes solved examples for each formula, handwritten but clear."
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A] placeholder:text-[#9A917A]"
+          />
+        </label>
+
+        <label className="text-sm font-medium">
+          Type
+          <select
+            value={sellForm.type}
+            onChange={(e) =>
+              setSellForm({ ...sellForm, type: e.target.value })
+            }
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
+          >
+            {["Lecture notes", "Solved past exam", "Study guide", "Lab summary"].map(
+              (t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              )
             )}
-          </PaperCard>
-        )}
+          </select>
+        </label>
+
+        <label className="text-sm font-medium">
+          Price (₺)
+          <input
+            type="number"
+            min={5}
+            max={300}
+            value={sellForm.price}
+            onChange={(e) =>
+              setSellForm({ ...sellForm, price: Number(e.target.value) })
+            }
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[15px] font-mono focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
+          />
+        </label>
+
+        <label className="text-sm font-medium">
+          PDF file
+          <input
+            type="file"
+            accept="application/pdf"
+            required
+            onChange={(e) =>
+              setSellForm({ ...sellForm, file: e.target.files[0] })
+            }
+            className="mt-1 w-full bg-[#F6F1E4] border border-[#C9BE9F] rounded-sm px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-[#1B2A4A]"
+          />
+        </label>
+
+        <button
+          type="submit"
+          disabled={uploading}
+          className="mt-1 bg-[#B8342A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm hover:bg-[#9C2C24] transition-colors disabled:opacity-60"
+        >
+          {uploading ? "Uploading…" : "Post listing"}
+        </button>
+      </form>
+    )}
+  </PaperCard>
+)}
 
         {view === "cart" && (
           <div className="max-w-lg mx-auto">
@@ -475,7 +586,17 @@ export default function App() {
                 </div>
                 <button
                   className="mt-4 w-full bg-[#1B2A4A] text-[#F6F1E4] font-semibold text-sm px-4 py-2.5 rounded-sm hover:bg-[#25396A] transition-colors"
-                  onClick={() => alert("Checkout is mocked in this prototype — payments not wired up yet.")}
+                  onClick={() => {
+  if (!user) {
+    setShowLogin(true);
+    return;
+  }
+  if (!user.emailVerified) {
+    alert("Please verify your email before checking out — check your inbox for the verification link.");
+    return;
+  }
+  alert("Checkout is mocked in this prototype — payments not wired up yet.");
+}}
                 >
                   Checkout
                 </button>
@@ -489,7 +610,7 @@ export default function App() {
         className="max-w-5xl mx-auto px-5 pb-10 pt-4 text-[12px] text-[#8A806A]"
         style={{ fontFamily: "'Inter', sans-serif" }}
       >
-        Not affiliated with, endorsed by, or operated by Istanbul Medipol University. An independent, student-run project. Notes and past exams shared here should be your own original work — please don't upload professors' slides or copyrighted course materials.
+        An independent, student-run project, not affiliated with or endorsed by any university. Notes and past exams shared here should be your own original work — please don't upload professors' slides or copyrighted course materials.
       </footer>
     </div>
   );
