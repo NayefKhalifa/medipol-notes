@@ -167,7 +167,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-2xl font-bold leading-tight tracking-tight">
-                Kampüs Not Pazarı
+                Kampüs sepeti
               </h1>
               <p
                 className="text-[12px] uppercase tracking-[0.14em] text-[#6B6250]"
